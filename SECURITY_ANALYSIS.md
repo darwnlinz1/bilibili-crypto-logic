@@ -1,79 +1,121 @@
-# Phân tích luồng xác thực phía client — Bilibili.tv
+# Security Analysis — Bilibili.tv Client-Side Authentication
 
-**Loại tài liệu:** Báo cáo nghiên cứu bảo mật (Security Research Write-up)
-**Tác giả:** darwnlinz1
-**Trạng thái:** Công khai, đã ẩn thông tin nhạy cảm
+**Document type:** Security research write-up
+**Author:** darwnlinz1
+**Status:** Public, sensitive material redacted
 
-## 1. Tóm tắt (Executive Summary)
+## 1. Executive Summary
 
-Nghiên cứu này phân tích cách client Bilibili.tv bảo vệ thông tin đăng nhập trước khi gửi lên máy chủ. Kết quả cho thấy client ghép một chuỗi `hash` động lấy từ API với mật khẩu thô, rồi mã hóa cả cụm bằng **RSA-1024, padding PKCS#1 v1.5**, với **khóa công khai được nhúng cứng (hardcoded) trong client**, cuối cùng mã hóa Base64 và gửi đi. Thiết kế này dùng đúng khái niệm RSA nhưng chọn tham số và định dạng payload đã lỗi thời (khóa 1024-bit, padding cũ, mật khẩu thô nằm trong payload). Báo cáo mô tả phương pháp phân tích, đánh giá rủi ro và đề xuất hướng khắc phục theo chuẩn hiện đại.
+This research analyzes how the Bilibili.tv client protects login credentials
+before sending them to the server. The client concatenates a dynamic `hash`
+string retrieved from the API with the raw password, then encrypts the whole
+string with **RSA-1024 and PKCS#1 v1.5 padding**, using a **hardcoded public key
+embedded in the client**, and finally Base64-encodes and transmits it. The design
+uses the RSA concept correctly but chooses outdated parameters and payload format
+(1024-bit key, legacy padding, raw password inside the payload). This report
+documents the analysis method, assesses the risk, and proposes fixes based on
+modern best practices.
 
-## 2. Phạm vi & Đạo đức (Scope & Ethics)
+## 2. Scope & Ethics
 
-- Toàn bộ phân tích thực hiện trên phần mềm/dịch vụ **tôi truy cập hợp pháp bằng tài khoản của chính mình**, phục vụ mục đích học tập và nghiên cứu bảo mật.
-- **Không có hệ thống nào bị tấn công.** Không truy cập trái phép, không tấn công máy chủ hay tài khoản của người khác.
-- Báo cáo **không kèm mã khai thác, không công bố thông tin đăng nhập thật**. Khóa công khai vốn đã có sẵn phía client và không phải bí mật; mọi mật khẩu/hash trong ví dụ đều là dữ liệu giả.
-- Mục tiêu: chứng minh khả năng phân tích một luồng xác thực đóng và đề xuất cải thiện.
+- All analysis was performed on software/services I **accessed legally with my
+  own account**, for educational and security-research purposes.
+- **No systems were attacked.** No unauthorized access was made, and no servers or
+  other people's accounts were targeted.
+- This report contains **no exploit code and no real credentials**. The public key
+  already ships inside the client and is not a secret; all passwords/hashes shown
+  are dummy data.
+- Goal: demonstrate the ability to analyze a closed authentication flow and
+  propose improvements.
 
-## 3. Phương pháp (Methodology)
+## 3. Methodology
 
-- **Môi trường:** máy cá nhân, cô lập.
-- **Cách tiếp cận:**
-  1. Xác định các bước client thực hiện trong luồng đăng nhập (lấy hash động → dựng payload → mã hóa → gửi).
-  2. Xác định thuật toán, kích thước khóa và kiểu padding.
-  3. Tái hiện độc lập bằng module Python (`cryptography`) để kiểm chứng hiểu biết, thay phần tự viết ASN.1/DER thủ công của client gốc bằng thư viện chuẩn.
-- **Tiêu chí "hiểu đúng":** dựng lại đúng định dạng payload (`hash + password`) và tạo được ciphertext hợp lệ với khóa công khai, không cần dùng lại binary gốc.
+- **Environment:** a personal, isolated machine.
+- **Approach:**
+  1. Identify the steps the client performs during login (fetch dynamic hash →
+     build payload → encrypt → send).
+  2. Determine the algorithm, key size, and padding type.
+  3. Independently reproduce the flow with a Python module (`cryptography`),
+     replacing the original client's manual ASN.1/DER byte parsing with the
+     standard library.
+- **Definition of "understood correctly":** reconstruct the exact payload format
+  (`hash + password`) and produce a valid ciphertext with the public key, without
+  reusing the original binary.
 
-## 4. Phát hiện kỹ thuật (Technical Findings)
+## 4. Technical Findings
 
-**Thuật toán:** RSA-1024, padding **PKCS#1 v1.5**.
+**Algorithm:** RSA-1024 with **PKCS#1 v1.5** padding.
 
-**Cách dựng payload:**
+**Payload construction:**
 
-1. Client lấy một chuỗi `hash` **động** từ API.
-2. Ghép trực tiếp: `payload = hash + password` (mật khẩu ở dạng **thô**).
-3. Mã hóa payload bằng **khóa công khai RSA-1024 nhúng cứng** trong client.
-4. Base64 ciphertext rồi gửi lên endpoint xác thực.
+1. The client retrieves a **dynamic** `hash` string from the API.
+2. It concatenates directly: `payload = hash + password` (password in **raw**
+   form).
+3. The payload is encrypted with a **hardcoded RSA-1024 public key** embedded in
+   the client.
+4. The ciphertext is Base64-encoded and sent to the authentication endpoint.
 
-**Luồng dữ liệu (mô tả):**
+**Data flow:**
 
 ```
-[API trả về hash động]
+[API returns a dynamic hash]
         │
         ▼
-[payload = hash + mật khẩu thô]
+[payload = hash + raw password]
         │
         ▼
-[Mã hóa RSA-1024 / PKCS#1 v1.5 bằng khóa công khai hardcoded]
+[RSA-1024 encryption / PKCS#1 v1.5 with the hardcoded public key]
         │
         ▼
-[Mã hóa Base64] ──► gửi lên endpoint đăng nhập
+[Base64 encoding] ──► sent to the login endpoint
 ```
 
-**Xử lý khóa:** khóa công khai RSA-1024 nằm sẵn trong client (bản chất là công khai, không phải bí mật). RSA không dùng IV. Không thấy lớp toàn vẹn/xác thực bổ sung.
+**Key handling:** an RSA-1024 public key is embedded in the client (it is public
+by nature, not a secret). RSA uses no IV. No additional integrity/authentication
+layer was found.
 
-## 5. Đánh giá bảo mật (Security Assessment)
+## 5. Security Assessment
 
-- **Khóa RSA-1024 quá yếu theo chuẩn hiện nay.** Các hướng dẫn hiện đại khuyến nghị tối thiểu **2048-bit**; 1024-bit đã bị coi là lỗi thời.
-- **Padding PKCS#1 v1.5 lỗi thời.** Có tiền sử dính lỗi *padding oracle* (Bleichenbacher); chuẩn hiện đại là **RSA-OAEP**.
-- **Mật khẩu thô nằm trong payload.** Việc đặt mật khẩu chưa băm vào cụm mã hóa nghĩa là sau khi giải mã, server thấy mật khẩu thô — làm tăng rủi ro nếu server bị xâm phạm hoặc log sai.
-- **`hash` động có thể là chống replay, nhưng chưa đủ.** Nếu không có ràng buộc thời gian/nonce chặt chẽ và toàn vẹn, giá trị của nó bị hạn chế.
-- **Chỉ có RSA thì thiếu toàn vẹn.** Mã hóa đơn thuần không chứng thực dữ liệu không bị chỉnh sửa.
-- **Ghi chú bối cảnh:** kênh truyền thường đã có TLS. Lớp RSA phía client là phòng thủ bổ sung; nếu tham số yếu, nó chủ yếu tạo cảm giác an toàn hơn là tăng an toàn thực chất (*security theater*).
+- **RSA-1024 is too weak by today's standards.** Modern guidance recommends at
+  least **2048 bits**; 1024-bit is considered obsolete.
+- **PKCS#1 v1.5 padding is outdated.** It has a history of *padding oracle*
+  vulnerabilities (Bleichenbacher); the modern standard is **RSA-OAEP**.
+- **The raw password sits inside the payload.** Placing an unhashed password in the
+  encrypted blob means that after decryption the server sees the raw password —
+  increasing risk if the server is compromised or logs incorrectly.
+- **The dynamic `hash` may be a replay defense, but is not sufficient alone.**
+  Without strict time/nonce binding and integrity, its value is limited.
+- **RSA alone lacks integrity.** Encryption on its own does not prove the data was
+  not modified.
+- **Context note:** the transport channel is usually already protected by TLS. The
+  client-side RSA layer is defense-in-depth; with weak parameters it mostly
+  creates a feeling of safety rather than real safety (*security theater*).
 
-## 6. Khuyến nghị (Recommendations)
+## 6. Recommendations
 
-Nếu đây là hệ thống của tôi, tôi sẽ:
+If this were my own system, I would:
 
-1. **Nâng khóa lên RSA ≥ 2048-bit** (hoặc chuyển sang đường cong elliptic hiện đại cho trao đổi khóa).
-2. **Thay PKCS#1 v1.5 bằng RSA-OAEP (SHA-256).**
-3. **Không đưa mật khẩu thô vào payload.** Xác thực bằng giao thức chuẩn (băm phía server bằng Argon2/bcrypt, hoặc dùng cơ chế như SRP) để server không bao giờ thấy mật khẩu thô.
-4. **Dùng mã hóa lai có xác thực:** AES-256-GCM cho dữ liệu + RSA-OAEP để bọc khóa, đảm bảo cả bí mật lẫn toàn vẹn.
-5. **Ràng buộc `hash` động với nonce + thời hạn** để chống tấn công phát lại (replay).
-6. **Dựa vào TLS làm lớp bảo vệ truyền tải chính**, coi mã hóa phía client là bổ sung chứ không thay thế.
+1. **Upgrade to RSA keys ≥ 2048 bits** (or move to modern elliptic-curve key
+   exchange).
+2. **Replace PKCS#1 v1.5 with RSA-OAEP (SHA-256).**
+3. **Never put the raw password in the payload.** Authenticate with a standard
+   protocol (server-side hashing with Argon2/bcrypt, or a scheme like SRP) so the
+   server never sees the raw password.
+4. **Use authenticated hybrid encryption:** AES-256-GCM for the data plus RSA-OAEP
+   to wrap the key, ensuring both confidentiality and integrity.
+5. **Bind the dynamic `hash` to a nonce and an expiry** to defend against replay
+   attacks.
+6. **Rely on TLS as the primary transport-security layer**, treating client-side
+   encryption as an addition rather than a replacement.
 
-## 7. Kết luận & Bài học (Conclusion & What I Learned)
+## 7. Conclusion & What I Learned
 
-Qua bài này tôi luyện được: đọc và tái hiện một luồng xác thực đóng, nhận diện vì sao RSA-1024 + PKCS#1 v1.5 + mật khẩu thô là những lựa chọn rủi ro, và hiểu vai trò của nonce/hash động trong chống replay. Bài học lớn nhất: dùng đúng thuật toán chưa đủ — **tham số và định dạng payload** mới quyết định hệ thống thực sự an toàn hay chỉ trông có vẻ an toàn.
+This exercise built skills in reading and reproducing a closed authentication
+flow, recognizing why RSA-1024 + PKCS#1 v1.5 + a raw password are risky choices,
+and understanding the role of nonces / dynamic hashes in replay protection. The
+biggest takeaway: using the right algorithm is not enough — the **parameters and
+payload format** are what determine whether a system is truly secure or merely
+looks secure.
 
-> *Tuyên bố miễn trừ: Tài liệu chỉ phục vụ mục đích giáo dục và nghiên cứu bảo mật. Không kèm mã khai thác, không công bố thông tin đăng nhập thật.*
+> *Disclaimer: This document is for educational and security-research purposes
+> only. It contains no exploit code and no real credentials.*
